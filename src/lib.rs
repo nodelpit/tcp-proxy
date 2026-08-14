@@ -9,9 +9,9 @@ use crate::proxy::accept_loop;
 pub async fn run(config: cli::Config) -> Result<()> {
     let listener = TcpListener::bind(config.listener).await?;
 
-    info!(%config.listener, "En écoute..");
+    info!(listener = %config.listener, "Proxy listening..");
 
-    accept_loop(listener).await;
+    accept_loop(listener, config.target).await;
 
     Ok(())
 }
