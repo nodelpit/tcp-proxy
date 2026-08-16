@@ -1,7 +1,10 @@
 use std::net::SocketAddr;
+
 use tcp_proxy::proxy::accept_loop;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[tokio::test]
 async fn accepts_connection() {
@@ -11,9 +14,20 @@ async fn accepts_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(listener, target_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        listener,
+        target_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     TcpStream::connect(addr).await.unwrap();
+
+    token.cancel();
+    tracker.close();
 }
 
 #[tokio::test]
@@ -24,11 +38,22 @@ async fn accepts_several_connections() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(listener, target_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        listener,
+        target_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     for _ in 0..5 {
         TcpStream::connect(addr).await.unwrap();
     }
+
+    token.cancel();
+    tracker.close();
 }
 
 #[tokio::test]
@@ -39,13 +64,24 @@ async fn survives_client_disconnect() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr: SocketAddr = listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(listener, target_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        listener,
+        target_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     let client = TcpStream::connect(addr).await.unwrap();
 
     drop(client);
 
     TcpStream::connect(addr).await.unwrap();
+
+    token.cancel();
+    tracker.close();
 }
 
 #[tokio::test]
@@ -70,9 +106,17 @@ async fn round_trip() {
     });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_addr: SocketAddr = proxy_listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(proxy_listener, echo_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        proxy_listener,
+        echo_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     let mut client = TcpStream::connect(proxy_addr).await.unwrap();
 
@@ -85,6 +129,9 @@ async fn round_trip() {
     client.read_exact(&mut response).await.unwrap();
 
     assert_eq!(response, message);
+
+    token.cancel();
+    tracker.close();
 }
 
 #[tokio::test]
@@ -109,9 +156,17 @@ async fn proxy_alives_with_large_volume() {
     });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_addr = proxy_listener.local_addr().unwrap();
+    let proxy_addr: SocketAddr = proxy_listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(proxy_listener, echo_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        proxy_listener,
+        echo_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     let mut client = TcpStream::connect(proxy_addr).await.unwrap();
 
@@ -133,6 +188,9 @@ async fn proxy_alives_with_large_volume() {
     }
 
     assert_eq!(response, payload);
+
+    token.cancel();
+    tracker.close();
 }
 
 #[tokio::test]
@@ -145,10 +203,21 @@ async fn survives_with_unreachable_target() {
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr: SocketAddr = proxy_listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(proxy_listener, target_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        proxy_listener,
+        target_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     let _client = TcpStream::connect(proxy_addr).await.unwrap();
     let _client = TcpStream::connect(proxy_addr).await.unwrap();
+
+    token.cancel();
+    tracker.close();
 }
 
 #[tokio::test]
@@ -171,13 +240,22 @@ async fn preserve_half_close() {
 
             request.extend_from_slice(&buffer[..n]);
         }
+
         target.write_all(b"response").await.unwrap();
     });
 
     let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr: SocketAddr = proxy_listener.local_addr().unwrap();
 
-    tokio::spawn(accept_loop(proxy_listener, target_addr));
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    tokio::spawn(accept_loop(
+        proxy_listener,
+        target_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
 
     let mut client = TcpStream::connect(proxy_addr).await.unwrap();
 
@@ -188,4 +266,34 @@ async fn preserve_half_close() {
     client.read_to_end(&mut response).await.unwrap();
 
     assert_eq!(response, b"response");
+
+    token.cancel();
+    tracker.close();
+}
+
+#[tokio::test]
+async fn stops_accepting_after_shutdown() {
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target_listener.local_addr().unwrap();
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let token = CancellationToken::new();
+    let tracker = TaskTracker::new();
+
+    let accept_task = tokio::spawn(accept_loop(
+        proxy_listener,
+        target_addr,
+        token.clone(),
+        tracker.clone(),
+    ));
+
+    TcpStream::connect(proxy_addr).await.unwrap();
+
+    token.cancel();
+
+    accept_task.await.unwrap();
+
+    assert!(TcpStream::connect(proxy_addr).await.is_err());
 }

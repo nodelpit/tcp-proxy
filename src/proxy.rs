@@ -3,19 +3,33 @@ use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 
-pub async fn accept_loop(listener: TcpListener, target: SocketAddr) {
+pub async fn accept_loop(
+    listener: TcpListener,
+    target: SocketAddr,
+    token: CancellationToken,
+    tracker: TaskTracker,
+) {
     loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                tokio::spawn(async move {
-                    handle_connection(stream, peer, target).await;
-                });
-            }
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, peer)) => {
+                        tracker.spawn(async move {
+                            handle_connection(stream, peer, target).await;
+                        });
+                    }
 
-            Err(error) => {
-                warn!(%error, "failed to accept connection");
+                    Err(error) => {
+                        warn!(%error, "failed to accept connection");
+                    }
+                }
+            }
+            _ = token.cancelled() => {
+                break;
             }
         }
     }
