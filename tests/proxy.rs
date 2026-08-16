@@ -150,3 +150,42 @@ async fn survives_with_unreachable_target() {
     let _client = TcpStream::connect(proxy_addr).await.unwrap();
     let _client = TcpStream::connect(proxy_addr).await.unwrap();
 }
+
+#[tokio::test]
+async fn preserve_half_close() {
+    let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr: SocketAddr = target_listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        let (mut target, _) = target_listener.accept().await.unwrap();
+
+        let mut request = Vec::new();
+        let mut buffer = [0; 1024];
+
+        loop {
+            let n = target.read(&mut buffer).await.unwrap();
+
+            if n == 0 {
+                break;
+            }
+
+            request.extend_from_slice(&buffer[..n]);
+        }
+        target.write_all(b"response").await.unwrap();
+    });
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr: SocketAddr = proxy_listener.local_addr().unwrap();
+
+    tokio::spawn(accept_loop(proxy_listener, target_addr));
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+
+    client.write_all(b"response").await.unwrap();
+    client.shutdown().await.unwrap();
+
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await.unwrap();
+
+    assert_eq!(response, b"response");
+}

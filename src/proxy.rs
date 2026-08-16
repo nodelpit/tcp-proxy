@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::time::timeout;
 use tracing::{debug, warn};
 
 pub async fn accept_loop(listener: TcpListener, target: SocketAddr) {
@@ -22,11 +24,18 @@ pub async fn accept_loop(listener: TcpListener, target: SocketAddr) {
 pub async fn handle_connection(stream: TcpStream, peer: SocketAddr, target: SocketAddr) {
     debug!(%peer, "connection accepted");
 
-    let mut outbound = match TcpStream::connect(target).await {
-        Ok(stream) => stream,
+    let mut outbound = match timeout(Duration::from_secs(5), TcpStream::connect(target)).await {
+        Ok(result) => match result {
+            Ok(stream) => stream,
 
-        Err(error) => {
-            warn!(%error, "failed to connect to target");
+            Err(error) => {
+                warn!(%peer, %target, %error, "failed to connect to target");
+                return;
+            }
+        },
+
+        Err(_) => {
+            warn!(%peer, %target, "target connection timed out");
             return;
         }
     };
